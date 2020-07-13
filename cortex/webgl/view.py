@@ -134,7 +134,16 @@ def make_static(outpath, data, types=("inflated",), recache=False, cmap="RdBu_r"
 
     db.auxfile = None
     if layout is None:
-        layout = [None, (1, 1), (2, 1), (3, 1), (2, 2), (3, 2), (3, 2), (3, 3), (3, 3), (3, 3)][len(subjects)]
+        layout = [None, (1, 1), (2, 1), (3, 1), (2, 2), (3, 2), (3, 2), 
+        (3, 3), (3, 3), (3, 3), 
+        (4,3), (4,3), (4,3), 
+        (5,3), (5,3), (5,3), 
+        (6,3), (6,3), (6,3), 
+        (7,3), (7,3), (7,3), 
+        (8,3), (8,3), (8,3), 
+        (9,3), (9,3), (9,3), 
+        (10,3), (10,3), (10,3), 
+        ][len(subjects)]
 
     ## Rename files to anonymize
     submap = dict()
@@ -332,7 +341,16 @@ def show(data, types=("inflated", ), recache=False, cmap='RdBu_r', layout=None,
     db.auxfile = None
 
     if layout is None:
-        layout = [None, (1, 1), (2, 1), (3, 1), (2, 2), (3, 2), (3, 2), (3, 3), (3, 3), (3, 3)][len(subjects)]
+        layout = [None, (1, 1), (2, 1), (3, 1), (2, 2), (3, 2), (3, 2), 
+        (3, 3), (3, 3), (3, 3), 
+        (4,3), (4,3), (4,3), 
+        (5,3), (5,3), (5,3), 
+        (6,3), (6,3), (6,3), 
+        (7,3), (7,3), (7,3), 
+        (8,3), (8,3), (8,3), 
+        (9,3), (9,3), (9,3), 
+        (10,3), (10,3), (10,3), 
+        ][len(subjects)]
 
     linear = lambda x, y, m: (1.-m)*x + m*y
     mixes = dict(
