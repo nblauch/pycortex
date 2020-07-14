@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 
 import os
-import sys
 from numpy.distutils.misc_util import get_numpy_include_dirs
 
 try:
@@ -37,6 +36,23 @@ class my_install(install):
             for fname in files:
                 os.chmod(os.path.join(root, fname), 438)
 
+
+# Modified from DataLad codebase to load version from pycortex/version.py
+def get_version():
+    """Load version from version.py without entailing any imports
+    Parameters
+    ----------
+    name: str
+      Name of the folder (package) where from to read version.py
+    """
+    # This might entail lots of imports which might not yet be available
+    # so let's do ad-hoc parsing of the version.py
+    with open(os.path.abspath('cortex/version.py')) as f:
+        version_lines = list(filter(lambda x: x.startswith('__version__'), f))
+    assert (len(version_lines) == 1)
+    return version_lines[0].split('=')[1].strip(" '\"\t\n")
+
+
 ctm = Extension('cortex.openctm', [
             'cortex/openctm.pyx',
             'OpenCTM-1.0.3/lib/openctm.c',
@@ -61,13 +77,42 @@ ctm = Extension('cortex.openctm', [
 formats = Extension('cortex.formats', ['cortex/formats.pyx'],
                     include_dirs=get_numpy_include_dirs())
 
-setup(name='pycortex',
-      version='1.0.2',
-      description='Python Cortical mapping software for fMRI data',
-      author='James Gao',
-      author_email='james@jamesgao.com',
-      packages=['cortex', 'cortex.webgl', 'cortex.mapper', 'cortex.dataset',
-                'cortex.blender', 'cortex.tests', 'cortex.quickflat', 'cortex.polyutils'],
+DISTNAME = 'pycortex'
+# VERSION needs to be modified under cortex/version.py
+VERSION = get_version()
+DESCRIPTION = 'Python Cortical mapping software for fMRI data'
+with open('README.md') as f:
+    LONG_DESCRIPTION = f.read()
+AUTHOR = 'James Gao'
+AUTHOR_EMAIL = 'james@jamesgao.com'
+LICENSE = '2-clause BSD license'
+URL = 'http://gallantlab.github.io/pycortex'
+DOWNLOAD_URL = URL
+with open('requirements.txt') as f:
+    INSTALL_REQUIRES = f.read().split()
+
+
+setup(name=DISTNAME,
+      version=VERSION,
+      description=DESCRIPTION,
+      long_description=LONG_DESCRIPTION,
+      long_description_content_type='text/markdown',
+      author=AUTHOR,
+      author_email=AUTHOR_EMAIL,
+      license=LICENSE,
+      url=URL,
+      download_url=DOWNLOAD_URL,
+      packages=[
+          'cortex',
+          'cortex.webgl',
+          'cortex.mapper',
+          'cortex.dataset',
+          'cortex.blender',
+          'cortex.tests',
+          'cortex.quickflat',
+          'cortex.polyutils',
+          'cortex.export'
+      ],
       ext_modules=cythonize([ctm, formats]),
       package_data={
             'cortex': [
@@ -87,12 +132,16 @@ setup(name='pycortex',
                 'resources/images/*'
             ]
             },
-      install_requires=[
-        'future', 'numpy', 'scipy', 'tornado>=4.3',
-        'shapely', 'lxml', 'html5lib', 'h5py', 'numexpr', 'cython',
-        'matplotlib', 'pillow', 'nibabel', 'networkx==2.1',
-      ],
+      install_requires=INSTALL_REQUIRES,
       cmdclass=dict(install=my_install),
       include_package_data=True,
-      test_suite='nose.collector'
-      )
+      classifiers=[
+          'Development Status :: 6 - Mature',
+          'Intended Audience :: Science/Research',
+          'License :: OSI Approved :: BSD License',
+          'Operating System :: OS Independent',
+          'Programming Language :: Python',
+          'Programming Language :: Python :: Implementation :: CPython',
+          'Topic :: Scientific/Engineering :: Visualization'
+      ]
+)

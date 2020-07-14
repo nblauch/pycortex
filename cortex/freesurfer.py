@@ -1,5 +1,6 @@
 """Contains functions for interfacing with freesurfer
 """
+from __future__ import print_function
 import os
 import copy
 import shutil
@@ -11,19 +12,26 @@ import subprocess as sp
 from builtins import input
 
 import numpy as np
+import nibabel
+from nibabel import gifti
+from tempfile import NamedTemporaryFile
+from scipy.spatial.kdtree import KDTree
+from scipy.linalg import lstsq
+from scipy.sparse import coo_matrix
+
 
 from . import database
 from . import anat
 
 
-def get_paths(subject, hemi, type="patch", freesurfer_subject_dir=None):
+def get_paths(fs_subject, hemi, type="patch", freesurfer_subject_dir=None):
     """Retrive paths for all surfaces for a subject processed by freesurfer
 
     Parameters
     ----------
     subject : string
-        Subject ID
-    hem : string ['lh'|'rh']
+        Subject ID for freesurfer subject
+    hemi : string ['lh'|'rh']
         Left ('lh') or right ('rh') hemisphere
     type : string ['patch'|'surf'|'curv']
         Which type of files to return
@@ -34,7 +42,7 @@ def get_paths(subject, hemi, type="patch", freesurfer_subject_dir=None):
     """
     if freesurfer_subject_dir is None:
         freesurfer_subject_dir = os.environ['SUBJECTS_DIR']
-    base = os.path.join(freesurfer_subject_dir, subject)
+    base = os.path.join(freesurfer_subject_dir, fs_subject)
     if type == "patch":
         return os.path.join(base, "surf", hemi+".{name}.patch.3d")
     elif type == "surf":
@@ -45,12 +53,12 @@ def get_paths(subject, hemi, type="patch", freesurfer_subject_dir=None):
         return os.path.join(base, "surf", hemi+".{name}_slim.obj")
 
 
-def autorecon(subject, type="all", parallel=False, n_cores=None):
+def autorecon(fs_subject, type="all", parallel=True, n_cores=None):
     """Run Freesurfer's autorecon-all command for a given freesurfer subject
 
     Parameters
     ----------
-    subject : string
+    fs_subject : string
         Freesurfer subject ID (should be a folder in your freesurfer $SUBJECTS_DIR)
     type : string
         Which steps of autorecon-all to perform. {'all', '1','2','3','cp','wm', 'pia'}
@@ -76,8 +84,8 @@ def autorecon(subject, type="all", parallel=False, n_cores=None):
         if resp.lower() not in ("yes", "y"):
             return
 
-    cmd = "recon-all -s {subj} -{cmd}".format(subj=subject, cmd=types[str(type)])
-    if parallel and type in ('2', 'wm'):
+    cmd = "recon-all -s {subj} -{cmd}".format(subj=fs_subject, cmd=types[str(type)])
+    if parallel and type in ('2', 'wm', 'all'):
         # Parallelization only works for autorecon2 or autorecon2-wm
         if n_cores is None:
             import multiprocessing as mp
@@ -87,12 +95,12 @@ def autorecon(subject, type="all", parallel=False, n_cores=None):
     sp.check_call(shlex.split(cmd))
 
 
-def flatten(subject, hemi, patch, freesurfer_subject_dir=None, save_every=None):
+def flatten(fs_subject, hemi, patch, freesurfer_subject_dir=None, save_every=None):
     """Perform flattening of a brain using freesurfer
 
     Parameters
     ----------
-    subject : str
+    fs_subject : str
         Freesurfer subject ID
     hemi : str ['lh' | 'rh']
         hemisphere to flatten
@@ -119,8 +127,8 @@ def flatten(subject, hemi, patch, freesurfer_subject_dir=None, save_every=None):
     """
     resp = input('Flattening takes approximately 2 hours! Continue? ')
     if resp.lower() in ('y', 'yes'):
-        inpath = get_paths(subject, hemi, freesurfer_subject_dir=freesurfer_subject_dir).format(name=patch)
-        outpath = get_paths(subject, hemi, freesurfer_subject_dir=freesurfer_subject_dir).format(name=patch+".flat")
+        inpath = get_paths(fs_subject, hemi, freesurfer_subject_dir=freesurfer_subject_dir).format(name=patch)
+        outpath = get_paths(fs_subject, hemi, freesurfer_subject_dir=freesurfer_subject_dir).format(name=patch+".flat")
         if save_every is None:
             save_every_str = ''
         else:
@@ -135,16 +143,23 @@ def flatten(subject, hemi, patch, freesurfer_subject_dir=None, save_every=None):
         return False
 
 
-def import_subj(subject, sname=None, freesurfer_subject_dir=None, whitematter_surf='smoothwm'):
+def import_subj(fs_subject, cx_subject=None, freesurfer_subject_dir=None, whitematter_surf='smoothwm'):
     """Imports a subject from freesurfer
+
+    This will overwrite (after giving a warning and an option to continue) the 
+    pre-existing subject, including all blender cuts, masks, transforms, etc., and
+    re-generate surface info files (curvature, sulcal depth, thickness) stored in 
+    the surfinfo/ folder for the subject. All cached files for the subject will be 
+    deleted. 
 
     Parameters
     ----------
-    subject : string
+    fs_subject : string
         Freesurfer subject name
-    sname : string, optional
+    cx_subject : string, optional
         Pycortex subject name (These variable names should be changed). By default uses
-        the same name as the freesurfer subject.
+        the same name as the freesurfer subject. Best to stick to that convention, if 
+        possible (your life will go more smoothly.) This optional kwarg is for edge cases. 
     freesurfer_subject_dir : string, optional
         Freesurfer subject directory to pull data from. By default uses the directory
         given by the environment variable $SUBJECTS_DIR.
@@ -152,28 +167,30 @@ def import_subj(subject, sname=None, freesurfer_subject_dir=None, whitematter_su
         Which whitematter surface to import as 'wm'. By default uses 'smoothwm', but that
         surface is smoothed and may not be appropriate. A good alternative is 'white'.
     """
-    if sname is None:
-        sname = subject
-    database.db.make_subj(sname)
+    if cx_subject is None:
+        cx_subject = fs_subject
+    # Create and/or replace extant subject. Throws a warning that this will happen.
+    database.db.make_subj(cx_subject)
 
     import nibabel
-    surfs = os.path.join(database.default_filestore, sname, "surfaces", "{name}_{hemi}.gii")
-    anats = os.path.join(database.default_filestore, sname, "anatomicals", "{name}.nii.gz")
-    surfinfo = os.path.join(database.default_filestore, sname, "surface-info", "{name}.npz")
+    surfs = os.path.join(database.default_filestore, cx_subject, "surfaces", "{name}_{hemi}.gii")
+    anats = os.path.join(database.default_filestore, cx_subject, "anatomicals", "{name}.nii.gz")
+    surfinfo = os.path.join(database.default_filestore, cx_subject, "surface-info", "{name}.npz")
     if freesurfer_subject_dir is None:
         freesurfer_subject_dir = os.environ['SUBJECTS_DIR']
-    fspath = os.path.join(freesurfer_subject_dir, subject, 'mri')
-    curvs = os.path.join(freesurfer_subject_dir, subject, 'surf', '{hemi}.{name}')
+    fspath = os.path.join(freesurfer_subject_dir, fs_subject, 'mri')
+    curvs = os.path.join(freesurfer_subject_dir, fs_subject, 'surf', '{hemi}.{name}')
 
     #import anatomicals
     for fsname, name in dict(T1="raw", aseg="aseg", wm="raw_wm").items():
         path = os.path.join(fspath, "{fsname}.mgz").format(fsname=fsname)
-        out = anats.format(subj=sname, name=name)
+        out = anats.format(subj=cx_subject, name=name)
         cmd = "mri_convert {path} {out}".format(path=path, out=out)
         sp.check_output(shlex.split(cmd))
 
-    # Make the fiducial files. Just make them.
-    make_fiducial(subject, freesurfer_subject_dir=freesurfer_subject_dir)
+    # (Re-)Make the fiducial files
+    # NOTE: these are IN THE FREESURFER $SUBJECTS_DIR !! which can cause confusion.
+    make_fiducial(fs_subject, freesurfer_subject_dir=freesurfer_subject_dir)
 
     # Freesurfer uses FOV/2 for center, let's set the surfaces to use the
     # magnet isocenter
@@ -183,31 +200,35 @@ def import_subj(subject, sname=None, freesurfer_subject_dir=None, whitematter_su
     from . import formats
     for fsname, name in [(whitematter_surf, "wm"), ('pial', "pia"), ('inflated', "inflated")]:
         for hemi in ("lh", "rh"):
-            pts, polys, _ = get_surf(subject, hemi, fsname, freesurfer_subject_dir=freesurfer_subject_dir)
-            fname = str(surfs.format(subj=sname, name=name, hemi=hemi))
+            pts, polys, _ = get_surf(fs_subject, hemi, fsname, freesurfer_subject_dir=freesurfer_subject_dir)
+            fname = str(surfs.format(subj=cx_subject, name=name, hemi=hemi))
             formats.write_gii(fname, pts=pts + surfmove, polys=polys)
 
     for curv, info in dict(sulc="sulcaldepth", thickness="thickness", curv="curvature").items():
         lh, rh = [parse_curv(curvs.format(hemi=hemi, name=curv)) for hemi in ['lh', 'rh']]
-        np.savez(surfinfo.format(subj=sname, name=info), left=-lh, right=-rh)
+        np.savez(surfinfo.format(subj=cx_subject, name=info), left=-lh, right=-rh)
 
     database.db = database.Database()
 
 
-def import_flat(subject, patch, hemis=['lh', 'rh'], sname=None,
-                flat_type='freesurfer',
-                freesurfer_subject_dir=None, clean=False):
+def import_flat(fs_subject, patch, hemis=['lh', 'rh'], cx_subject=None,
+                flat_type='freesurfer', auto_overwrite=False,
+                freesurfer_subject_dir=None, clean=True):
     """Imports a flat brain from freesurfer
+
+    NOTE: This will delete the overlays.svg file for this subject, since THE
+    FLATMAPS WILL CHANGE, as well as all cached information (e.g. old flatmap 
+    boundaries, roi svg intermediate renders, etc). 
 
     Parameters
     ----------
-    subject : str
+    fs_subject : str
         Freesurfer subject name
     patch : str
         Name of flat.patch.3d file; e.g., "flattenv01"
     hemis : list
         List of hemispheres to import. Defaults to both hemispheres.
-    sname : str
+    cx_subject : str
         Pycortex subject name
     freesurfer_subject_dir : str
         directory for freesurfer subjects. None defaults to evironment variable
@@ -218,20 +239,30 @@ def import_flat(subject, patch, hemis=['lh', 'rh'], sname=None,
     Returns
     -------
     """
-    if sname is None:
-        sname = subject
-    surfs = os.path.join(database.default_filestore, sname, "surfaces", "flat_{hemi}.gii")
+    if not auto_overwrite:
+        proceed = input(('Warning: This is intended to over-write .gii files storing\n'
+                         'flatmap vertex locations for this subject, and will result\n'
+                         'in deletion of the overlays.svg file and all cached info\n'
+                         'for this subject (because flatmaps will fundamentally change).\n'
+                         'Proceed? [y]/n: '))
+        if proceed.lower() not in ['y', 'yes', '']:
+            print(">>> Elected to quit rather than delete & overwrite files.")
+            return
+
+    if cx_subject is None:
+        cx_subject = fs_subject
+    surfs = os.path.join(database.default_filestore, cx_subject, "surfaces", "flat_{hemi}.gii")
 
     from . import formats
     for hemi in hemis:
         if flat_type == 'freesurfer':
-            pts, polys, _ = get_surf(subject, hemi, "patch", patch+".flat", freesurfer_subject_dir=freesurfer_subject_dir)
+            pts, polys, _ = get_surf(fs_subject, hemi, "patch", patch+".flat", freesurfer_subject_dir=freesurfer_subject_dir)
             # Reorder axes: X, Y, Z instead of Y, X, Z
             flat = pts[:, [1, 0, 2]]
             # Flip Y axis upside down
             flat[:, 1] = -flat[:, 1]
         elif flat_type == 'slim':
-            flat_file = get_paths(subject, hemi, type='slim',
+            flat_file = get_paths(fs_subject, hemi, type='slim',
                                   freesurfer_subject_dir=freesurfer_subject_dir)
             flat_file = flat_file.format(name=patch + ".flat")
             flat, polys = formats.read_obj(flat_file)
@@ -245,14 +276,11 @@ def import_flat(subject, patch, hemis=['lh', 'rh'], sname=None,
         formats.write_gii(fname, pts=flat, polys=polys)
 
     # clear the cache, per #81
-    cache = os.path.join(database.default_filestore, sname, "cache")
-    shutil.rmtree(cache)
-    os.makedirs(cache)
-    # clear config-specified cache
-    from .options import config
-    config_cache = os.path.expanduser(os.path.join(config.get('basic', 'cache'), sname, 'cache'))
-    shutil.rmtree(config_cache)
-    os.makedirs(config_cache)
+    database.db.clear_cache(cx_subject)
+    # Remove overlays.svg file (FLATMAPS HAVE CHANGED)
+    overlays_file = database.db.get_paths(cx_subject)['overlays']
+    os.unlink(overlays_file)
+    # Regenerate it? 
 
 
 def _remove_disconnected_polys(polys):
@@ -307,13 +335,13 @@ def _move_disconnect_points_to_zero(pts, polys):
     return pts
 
 
-def make_fiducial(subject, freesurfer_subject_dir=None):
+def make_fiducial(fs_subject, freesurfer_subject_dir=None):
     """Make fiducial surface (halfway between white matter and pial surfaces)
     """
     for hemi in ['lh', 'rh']:
-        spts, polys, _ = get_surf(subject, hemi, "smoothwm", freesurfer_subject_dir=freesurfer_subject_dir)
-        ppts, _, _ = get_surf(subject, hemi, "pial", freesurfer_subject_dir=freesurfer_subject_dir)
-        fname = get_paths(subject, hemi, "surf", freesurfer_subject_dir=freesurfer_subject_dir).format(name="fiducial")
+        spts, polys, _ = get_surf(fs_subject, hemi, "smoothwm", freesurfer_subject_dir=freesurfer_subject_dir)
+        ppts, _, _ = get_surf(fs_subject, hemi, "pial", freesurfer_subject_dir=freesurfer_subject_dir)
+        fname = get_paths(fs_subject, hemi, "surf", freesurfer_subject_dir=freesurfer_subject_dir).format(name="fiducial")
         write_surf(fname, (spts + ppts) / 2, polys)
 
 
@@ -465,21 +493,21 @@ def _move_labels(subject, label, hemisphere=('lh','rh'), fs_dir=None, src_subjec
     print("Labels transferred")
 
 
-def _parse_labels(label_files, subject):
+def _parse_labels(label_files, cx_subject):
     """Extract values from freesurfer label file(s) and map to vertices
 
     Parameters
     ----------
     label_files : str or list
         full paths to label file or files to load
-    subject : str
+    cx_subject : str
         pycortex subject ID
     """
     if not isinstance(label_files, (list, tuple)):
         label_files = [label_files]
     verts = []
     values = []
-    lh_surf, _ = database.db.get_surf(subject, 'fiducial', 'left')
+    lh_surf, _ = database.db.get_surf(cx_subject, 'fiducial', 'left')
     for fname in label_files:
         with open(fname) as fid:
             lines = fid.readlines()
@@ -494,12 +522,12 @@ def _parse_labels(label_files, subject):
     values = np.hstack(values)
     return verts, values
 
-def get_label(subject, label, fs_subject=None, fs_dir=None, src_subject='fsaverage', hemisphere=('lh', 'rh'), **kwargs):
+def get_label(cx_subject, label, fs_subject=None, fs_dir=None, src_subject='fsaverage', hemisphere=('lh', 'rh'), **kwargs):
     """Get data from a label file for fsaverage subject
 
     Parameters
     ----------
-    subject : str
+    cx_subject : str
         A pycortex subject ID
     label : str
         Label name
@@ -517,26 +545,238 @@ def get_label(subject, label, fs_subject=None, fs_dir=None, src_subject='fsavera
     else:
         os.environ['SUBJECTS_DIR'] = fs_dir
     if fs_subject is None:
-        fs_subject = subject
+        fs_subject = cx_subject
     label_files = [os.path.join(fs_dir, fs_subject, 'label', '{}.{}.label'.format(h, label)) for h in hemisphere]
-    if subject not in ['fsaverage', 'MNI', 'fsaverage_pycortex']:
+    if cx_subject not in ['fsaverage', 'MNI']:
         # If label file doesn't exist, try to move it there
         print('looking for {}'.format(label_files))
         if not all([os.path.exists(f) for f in label_files]):
             print("Transforming label file to subject's freesurfer directory...")
             _move_labels(fs_subject, label, hemisphere=hemisphere, fs_dir=fs_dir, src_subject=src_subject)
-    verts, values = _parse_labels(label_files, subject)
+    verts, values = _parse_labels(label_files, cx_subject)
     idx = verts.astype(np.int)
     return idx, values
 
 
-def get_curv(subject, hemi, type='wm', freesurfer_subject_dir=None):
-    """Load freesurfer curv file
+def _mri_surf2surf_command(src_subj, trg_subj, input_file, output_file, hemi):
+    # mri_surf2surf --srcsubject <source subject name> --srcsurfval
+    # <sourcefile> --trgsubject <target suhject name> --trgsurfval <target
+    # file> --hemi <hemifield>
+
+    cmd = ["mri_surf2surf", "--srcsubject", src_subj,
+                            "--sval", input_file,
+                            "--trgsubject", trg_subj,
+                            "--tval", output_file,
+                            "--hemi", hemi,
+          ]
+    return cmd
+
+
+
+def mri_surf2surf(data, source_subj, target_subj, hemi, subjects_dir=None):
+    """Uses freesurfer mri_surf2surf to transfer vertex data between
+        two freesurfer subjects
+    
+    Parameters
+    ==========
+    data: ndarray, shape=(n_imgs, n_verts)
+        data arrays representing vertex data
+    
+    source_subj: str
+        freesurfer subject name of source subject
+    
+    target_subj: str
+        freesurfer subject name of target subject
+    
+    hemi: str in ("lh", "rh")
+        string indicating hemisphere.
+    
+    Notes
+    =====
+    Requires path to mri_surf2surf or freesurfer environment to be active.
+    """
+    data_arrays = [gifti.GiftiDataArray(d) for d in data]
+    gifti_image = gifti.GiftiImage(darrays=data_arrays)
+
+    tf_in = NamedTemporaryFile(suffix=".gii")
+    nibabel.save(gifti_image, tf_in.name)
+
+    tf_out = NamedTemporaryFile(suffix='.gii')
+    cmd = _mri_surf2surf_command(source_subj, target_subj,
+                                   tf_in.name, tf_out.name, hemi)
+    if subjects_dir is not None:
+        env = os.environ.copy()
+        env['SUBJECTS_DIR'] = subjects_dir
+    else:
+        env = None
+
+    print('Calling:')
+    print(' '.join(cmd))
+    p = sp.Popen(cmd, env=env)
+    exit_code = p.wait()
+    if exit_code != 0:
+        if exit_code == 255:
+            raise Exception(("Missing file (see above). "
+                             "If lh.sphere.reg is missing,\n"
+                             "you likely need to run the 3rd "
+                             "stage of freesurfer autorecon\n"
+                             "(sphere registration) for this subject:\n"
+                             ">>> cortex.freesurfer.autorecon('{fs_subject}', type='3')"
+                             ).format(fs_subject=source_subj))
+        #from subprocess import CalledProcessError # handle with this, maybe?
+        raise Exception(("Exit code {exit_code} means that "
+            "mri_surf2surf failed").format(exit_code=exit_code))
+
+    tf_in.close()
+    output_img = nibabel.load(tf_out.name)
+    output_data = np.array([da.data for da in output_img.darrays])
+    tf_out.close()
+    return output_data
+
+
+def get_mri_surf2surf_matrix(source_subj, hemi, surface_type,
+                            target_subj='fsaverage', subjects_dir=None,
+                            n_neighbors=20, random_state=0,
+                            n_test_images=40, coef_threshold=None,
+                            renormalize=True):
+
+    """Creates a matrix implementing freesurfer mri_surf2surf command.
+    
+    A surface-to-surface transform is a linear transform between vertex spaces.
+    Such a transform must be highly localized in the sense that a vertex in the
+    target surface only draws its values from very few source vertices.
+    This function exploits the localization to create an inverse problem for 
+    each vertex.
+    The source neighborhoods for each target vertex are found by using
+    mri_surf2surf to transform the three coordinate maps from the source 
+    surface to the target surface, yielding three coordinate values for each
+    target vertex, for which we find the nearest neighbors in the source space.
+    A small number of test images is transformed from source surface to
+    target surface.	
+    For each target vertex in the transformed test images, a regression is 
+    performed using only the corresponding source image neighborhood, yielding
+    the entries for a sparse matrix encoding the transform.
+    
+    Parameters
+    ==========
+    
+    source_subj: str
+    	Freesurfer name of source subject
+    
+    hemi: str in ("lh", "rh")
+    	Indicator for hemisphere
+    
+    surface_type: str in ("white", "pial", ...)
+    	Indicator for surface layer
+    
+    target_subj: str, default "fsaverage"
+    	Freesurfer name of target subject
+    
+    subjects_dir: str, default os.environ["SUBJECTS_DIR"]
+    	The freesurfer subjects directory
+    
+    n_neighbors: int, default 20
+    	The size of the neighborhood to take into account when estimating
+    	the source support of a vertex
+    
+    random_state: int, default 0
+    	Random number generator or seed for generating test images
+    
+    n_test_images: int, default 40
+    	Number of test images transformed to compute inverse problem. This 
+    	should be greater than n_neighbors or equal.
+    
+    coef_treshold: float, default 1 / (10 * n_neighbors)
+    	Value under which to set a weight to zero in the inverse problem.
+    
+    renormalize: boolean, default True
+    	Determines whether the rows of the output matrix should add to 1,
+    	implementing what is sensible: a weighted averaging
+    
+    Notes
+    =====
+    It turns out that freesurfer seems to do the following: For each target
+    vertex, find, on the sphere, the nearest source vertices, and average their
+    values. Try to be as one-to-one as possible.
+    """
+
+    source_verts, _, _ = get_surf(source_subj, hemi, surface_type,
+                                  freesurfer_subject_dir=subjects_dir)
+
+    transformed_coords = mri_surf2surf(source_verts.T,
+                                       source_subj, target_subj, hemi,
+                                       subjects_dir=subjects_dir)
+
+    kdt = KDTree(source_verts)
+    print("Getting nearest neighbors")
+    distances, indices = kdt.query(transformed_coords.T, k=n_neighbors)
+    print("Done")
+
+    rng = (np.random.RandomState(random_state) 
+                          if isinstance(random_state, int) else random_state)
+    test_images = rng.randn(n_test_images, len(source_verts))
+    transformed_test_images = mri_surf2surf(test_images, source_subj,
+                                            target_subj, hemi,
+                                            subjects_dir=subjects_dir)
+
+    # Solve linear problems to get coefficients
+    all_coefs = []
+    residuals = []
+    print("Computing coefficients")
+    i = 0
+    for target_activation, source_inds in zip(
+                                        transformed_test_images.T, indices):
+        i += 1
+        print("{i}".format(i=i), end="\r")
+        source_values = test_images[:, source_inds]
+        r = lstsq(source_values, target_activation,
+                 overwrite_a=True, overwrite_b=True)
+        all_coefs.append(r[0])
+        residuals.append(r[1])
+    print("Done")
+
+    all_coefs = np.array(all_coefs)
+
+    if coef_threshold is None:  # we know now that coefs are doing averages
+        coef_threshold = (1 / 10. / n_neighbors )
+    all_coefs[np.abs(all_coefs) < coef_threshold] = 0
+    if renormalize:
+        all_coefs /= np.abs(all_coefs).sum(axis=1)[:, np.newaxis] + 1e-10
+
+    # there seem to be like 7 vertices that don't constitute an average over
+    # 20 vertices or less, but all the others are such an average.
+
+    # Let's make a matrix that does the transform:
+    col_indices = indices.ravel()
+    row_indices = (np.arange(indices.shape[0])[:, np.newaxis] *
+                   np.ones(indices.shape[1], dtype='int')).ravel()
+    data = all_coefs.ravel()
+    shape = (transformed_coords.shape[1], source_verts.shape[0])
+
+    matrix = coo_matrix((data, (row_indices, col_indices)), shape=shape)
+
+    return matrix
+
+
+def get_curv(fs_subject, hemi, type='wm', freesurfer_subject_dir=None):
+    """Load freesurfer curv file for a freesurfer subject
+
+    Parameters
+    ----------
+    fs_subject : str
+        freesurfer subject identifier
+    hemi : str
+        'lh' or 'rh' for left or right hemisphere, respectively
+    type : str
+        'wm' or other type of surface (e.g. 'fiducial' or 'pial')
+    freesurfer_subject_dir : str
+        directory for Freesurfer subjects (defaults to value for the 
+        environment variable $SUBJECTS_DIR if None)
     """
     if type == "wm":
-        curv_file = get_paths(subject, hemi, 'curv', freesurfer_subject_dir=freesurfer_subject_dir).format(name='')
+        curv_file = get_paths(fs_subject, hemi, 'curv', freesurfer_subject_dir=freesurfer_subject_dir).format(name='')
     else:
-        curv_file = get_paths(subject, hemi, 'curv', freesurfer_subject_dir=freesurfer_subject_dir).format(name='.'+type)
+        curv_file = get_paths(fs_subject, hemi, 'curv', freesurfer_subject_dir=freesurfer_subject_dir).format(name='.'+type)
 
     return parse_curv(curv_file)
 
@@ -558,6 +798,9 @@ def show_surf(subject, hemi, type, patch=None, curv=True, freesurfer_subject_dir
 
     freesurfer_subject_dir :
     """
+    warnings.warn(('Deprecated and probably broken! Try `cortex.segment.show_surf()`\n'
+                  'which uses a third-party program (meshlab, available for linux & mac\n'
+                  'instead of buggy mayavi code!'))
     from mayavi import mlab
     from tvtk.api import tvtk
 

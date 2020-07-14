@@ -9,11 +9,15 @@ import numpy as np
 import subprocess as sp
 from matplotlib.path import Path
 from scipy.spatial import cKDTree
+from builtins import zip, str
+
+from distutils.version import LooseVersion
 
 from lxml import etree
 from lxml.builder import E
 
 from .options import config
+from .testing_utils import INKSCAPE_VERSION
 
 svgns = "http://www.w3.org/2000/svg"
 inkns = "http://www.inkscape.org/namespaces/inkscape"
@@ -150,10 +154,10 @@ class SVGOverlay(object):
                 with_ims = zip(range(len(with_ims)), with_ims)
 
             datalayer = _make_layer(outsvg.getroot(), "data")
-            for imnum,im in reversed(with_ims):
+            for imnum, im in reversed(list(with_ims)):  # need list() with zip for python 3.5 compatibility
                 imlayer = _make_layer(datalayer, "image_%d" % imnum)
                 img = E.image(
-                    {"{http://www.w3.org/1999/xlink}href":"data:image/png;base64,%s"%im},
+                    {"{http://www.w3.org/1999/xlink}href":"data:image/png;base64,%s"%str(im,'utf-8')},
                     id="image_%d"%imnum, x="0", y="0",
                     width=str(self.svgshape[0]),
                     height=str(self.svgshape[1]),
@@ -232,6 +236,10 @@ class SVGOverlay(object):
         if height is None:
             height = self.svgshape[1]
         #label_defaults = _parse_defaults(layer+'_labels')
+        
+        # separate kwargs starting with "label-"
+        label_kwargs = {k[6:]:v for k, v in kwargs.items() if k[:6] == "label-"}
+        kwargs = {k:v for k, v in kwargs.items() if k[:6] != "label-"}
 
         for layer in self:
             if layer.name==layer_name:
@@ -245,6 +253,7 @@ class SVGOverlay(object):
                         # do not have individually settable visibility / style params
                         tmp_style = copy.deepcopy(layer.labels.text_style)
                         tmp_style['fill-opacity'] = '1' if shape_.visible else '0'
+                        tmp_style.update(label_kwargs)
                         tmp_style_str = ';'.join(['%s:%s'%(k,v) for k, v in tmp_style.items() if v != 'None'])
                         for i in range(len(layer.labels.elements[name_])):
                             layer.labels.elements[name_][i].set('style', tmp_style_str)
@@ -259,10 +268,21 @@ class SVGOverlay(object):
             pngfile = png.name
 
         inkscape_cmd = config.get('dependency_paths', 'inkscape')
-        cmd = "{inkscape_cmd} -z -h {height} -e {outfile} /dev/stdin"
+        if LooseVersion(INKSCAPE_VERSION) < LooseVersion('1.0'):
+            cmd = "{inkscape_cmd} -z -h {height} -e {outfile} /dev/stdin"
+        else:
+            cmd = "{inkscape_cmd} -h {height} --export-filename {outfile} " \
+                  "/dev/stdin"
         cmd = cmd.format(inkscape_cmd=inkscape_cmd, height=height, outfile=pngfile)
-        proc = sp.Popen(shlex.split(cmd), stdin=sp.PIPE, stdout=sp.PIPE)
-        proc.communicate(etree.tostring(self.svg))
+        proc = sp.Popen(shlex.split(cmd), stdin=sp.PIPE, stdout=sp.PIPE, stderr=sp.PIPE)
+        stdout, stderr = proc.communicate(etree.tostring(self.svg))
+        
+        # print stderr, except the warning "Format autodetect failed."
+        if hasattr(stderr, 'decode'):
+            stderr = stderr.decode()
+        for line in stderr.split('\n'):
+            if line != '' and 'Format autodetect failed.' not in line:
+                print(line)
 
         if background is not None:
             self.svg.getroot().remove(img)
@@ -497,11 +517,13 @@ def _make_layer(parent, name):
 
 try:
     from shapely.geometry import Polygon
+
     def _center_pts(pts):
         '''Fancy label position generator, using erosion to get label coordinate'''
         min = pts.min(0)
         pts -= min
         max = pts.max(0)
+        max[max == 0] = 1        
         pts /= max
 
         #probably don't need more than 20 points, reduce detail of the polys
@@ -509,24 +531,31 @@ try:
             pts = pts[::len(pts)//20]
 
         try:
+            if len(pts) < 3:
+                raise RuntimeError()
             poly = Polygon([tuple(p) for p in pts])
+            last_i = None
             for i in np.linspace(0,1,100):
                 if poly.buffer(-i).is_empty:
-                    return list(poly.buffer(-last_i).centroid.coords)[0] * max + min
+                    if last_i is None:
+                        raise RuntimeError()
+                    a = list(poly.buffer(-last_i).centroid.coords)[0] * max + min
+                    return a
                 last_i = i
 
-            print("unable to find zero centroid...")
-            return list(poly.buffer(-100).centroid.coords)[0] * max + min
-        except:
-            # This may not be worth being so verbose about... I think this is only for label positions.
             import warnings
-            warnings.warn("Shapely error - computing mean of points instead of geometric center")
-            return np.nanmean(pts, 0)
+            warnings.warn("Unable to find zero centroid.")
+            return list(poly.buffer(-100).centroid.coords)[0] * max + min
+        except RuntimeError:
+            return np.nanmean(pts, 0) * max + min
 
 except (ImportError, OSError):
-    print("Cannot find shapely, using simple label placement")
+    import warnings
+    warnings.warn("Cannot find shapely, using simple label placement.")
+
     def _center_pts(pts):
-        return pts.mean(0)
+        return np.nanmean(pts, 0)
+
 
 def _labelpos(pts):
     if pts.ndim < 3:
@@ -638,12 +667,20 @@ def get_overlay(subject, svgfile, pts, polys, remove_medial=False,
         import binascii
 
         # Curvature
-        curv = db.get_surfinfo(subject, 'curvature')
-        curv.cmap = 'gray'
-        fp = io.BytesIO()
-        quickflat.make_png(fp, curv, height=1024, with_rois=False, with_labels=False)
-        fp.seek(0)
-        svg.rois.add_shape('curvature', binascii.b2a_base64(fp.read()).decode('utf-8'), False)
+        for layer_name, cmap in zip(['curvature', 'sulcaldepth', 'thickness'], ['gray', 'RdBu_r', 'viridis']):
+            try:
+                curv = db.get_surfinfo(subject, layer_name)
+            except:
+                print("Failed to import svg layer for %s, continuing"%layer_name)
+                continue
+            curv.cmap = cmap
+            vmax = np.abs(curv.data).max()
+            curv.vmin = -vmax
+            curv.vmax = vmax
+            fp = io.BytesIO()
+            quickflat.make_png(fp, curv, height=1024, with_rois=False, with_labels=False)
+            fp.seek(0)
+            svg.rois.add_shape(layer_name, binascii.b2a_base64(fp.read()).decode('utf-8'), False)
 
     else:
         svg = SVGOverlay(svgfile, 

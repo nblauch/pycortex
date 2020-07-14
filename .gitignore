@@ -42,13 +42,20 @@ nosetests.xml
 .project
 .pydevproject
 
-# OS X bullshit
+# OS X 
 .DS_store
 
 # vim temp files
 *~
 
-# vscode
+# vscode and other IDEs
 .vscode
+.idea
 
 *.nfs*
+
+# docs build
+docs/_build
+docs/auto_examples
+docs/generated
+docs/colormaps.rst
