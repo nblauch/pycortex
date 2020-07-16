@@ -10,7 +10,7 @@ def save_3d_views(volume, base_name='fig', list_angles=['lateral_pivot'],
                   list_surfaces=['inflated'],
                   viewer_params=dict(labels_visible=[],
                                      overlays_visible=['rois']),
-                  size=(1024 * 4, 768 * 4), trim=True, sleep=10):
+                  size=(1024 * 4, 768 * 4), trim=True, sleep=10, close=True):
     """Saves 3D views of `volume` under multiple specifications.
 
     Needs to be run on a system with a display (will launch webgl viewer).
@@ -119,7 +119,9 @@ def save_3d_views(volume, base_name='fig', list_angles=['lateral_pivot'],
 
     # Try to close the window
     try:
-        handle.close()
+        if close:
+            # we might not want to close the server if we cannot automatically launch it and want to run this multiple times
+            handle.close()
         handle.server.stop()
     except Exception as e:
         print(str(e))

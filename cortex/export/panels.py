@@ -10,7 +10,7 @@ from .save_views import save_3d_views
 
 
 def plot_panels(volume, panels, figsize=(16, 9), windowsize=(1600*4, 900*4), 
-                save_name=None, sleep=10,
+                save_name=None, sleep=10, close=True,
                 viewer_params=dict(labels_visible=[],
                                    overlays_visible=['rois'])):
     """Plot on the same figure a number of views, as defined by a list of panel
@@ -75,7 +75,7 @@ def plot_panels(volume, panels, figsize=(16, 9), windowsize=(1600*4, 900*4),
     base_name = os.path.join(temp_dir, 'fig')
     filenames = save_3d_views(volume, base_name, list_angles=list_angles,
                               list_surfaces=list_surfaces, trim=True,
-                              size=windowsize, sleep=sleep,
+                              size=windowsize, sleep=sleep, close=close,
                               viewer_params=viewer_params)
 
     fig = plt.figure(figsize=figsize)
@@ -116,7 +116,7 @@ def plot_panels(volume, panels, figsize=(16, 9), windowsize=(1600*4, 900*4),
     # note that you might get a slightly different layout with `plt.show()`
     # since it might use a different backend
     if save_name is not None:
-        fig.savefig(save_name, bbox_inches='tight', dpi=100)
+        fig.savefig(save_name, bbox_inches='tight', dpi=300, transparent=True)
         
     # delete temporary directory
     try:
@@ -181,7 +181,7 @@ params_occipital_triple_view = {
         'view': {
             'angle': 'flatmap',
             'surface': 'flatmap',
-            'zoom': [0.250, 0.000, 0.500, 1.000]
+            # 'zoom': [0.250, 0.000, 0.500, 1.000]
         }
     }, {
         'extent': [0.000, 0.000, 0.250, 0.333],
@@ -193,7 +193,7 @@ params_occipital_triple_view = {
     }, {
         'extent': [0.000, 0.333, 0.250, 0.333],
         'view': {
-            'hemisphere': 'left',
+            'hemisphere': 'right',
             'angle': 'medial_pivot',
             'surface': 'inflated'
         }
@@ -214,7 +214,7 @@ params_occipital_triple_view = {
     }, {
         'extent': [0.750, 0.333, 0.250, 0.333],
         'view': {
-            'hemisphere': 'right',
+            'hemisphere': 'left',
             'angle': 'medial_pivot',
             'surface': 'inflated'
         }
@@ -229,49 +229,49 @@ params_occipital_triple_view = {
 }
 
 params_inflated_lateral_medial_ventral = {
-    'figsize': [10, 9],
+    'figsize': [20, 18],
     'panels': [
         {
             'extent': [0.0, 0.0, 0.5, 1/3.],
             'view': {
                 'hemisphere': 'left',
                 'angle': 'bottom_pivot',
-                'surface': 'inflated_less'
+                'surface': 'inflated'
             }
         }, {
             'extent': [0.000, 1/3., 0.5, 1/3.],
             'view': {
                 'hemisphere': 'left',
                 'angle': 'medial_pivot',
-                'surface': 'inflated_less'
+                'surface': 'inflated'
             }
         }, {
             'extent': [0.000, 2/3., 0.5, 1/3.],
             'view': {
                 'hemisphere': 'left',
                 'angle': 'lateral_pivot',
-                'surface': 'inflated_less'
+                'surface': 'inflated'
             }
         }, {
             'extent': [0.5, 0.0, 0.5, 1/3.],
             'view': {
                 'hemisphere': 'right',
                 'angle': 'bottom_pivot',
-                'surface': 'inflated_less'
+                'surface': 'inflated'
             }
         }, {
             'extent': [0.5, 1/3., 0.5, 1/3.],
             'view': {
                 'hemisphere': 'right',
                 'angle': 'medial_pivot',
-                'surface': 'inflated_less'
+                'surface': 'inflated'
             }
         }, {
             'extent': [0.5, 2/3., 0.5, 1/3.],
             'view': {
                 'hemisphere': 'right',
                 'angle': 'lateral_pivot',
-                'surface': 'inflated_less'
+                'surface': 'inflated'
             }
     }]
 }
