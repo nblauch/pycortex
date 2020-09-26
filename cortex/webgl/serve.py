@@ -26,7 +26,7 @@ from tornado import websocket
 from tornado.web import HTTPError
 
 cwd = os.path.split(os.path.abspath(__file__))[0]
-hostname = socket.gethostname()
+hostname = 'localhost' #socket.gethostname()
 
 def make_base64(imgfile):
     with open(imgfile, 'rb') as img:
