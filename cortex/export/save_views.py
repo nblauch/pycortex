@@ -165,6 +165,10 @@ angle_view_params = {
         'camera.azimuth': 0,
         'camera.altitude': 180,
     },
+    'bottom_r': {
+        'camera.azimuth': 180,
+        'camera.altitude': 180,
+    },
     'ventral': {
         'camera.azimuth': 180,
         'camera.altitude': 120,
