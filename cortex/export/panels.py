@@ -95,6 +95,9 @@ def plot_panels(volume, panels, figsize=(16, 9), windowsize=(1600*4, 900*4),
                 image = right
 
         # trim white borders
+        if len(image.shape) == 2:
+            image = np.tile(image, (4,1,1)).transpose(1,2,0)
+            image[:,:,3] = np.asarray(np.sum(image,axis=-1)>0, dtype=int)
         image = image[image.sum(axis=1).sum(axis=1) > 0]
         image = image[:, image.sum(axis=0).sum(axis=1) > 0]
 
